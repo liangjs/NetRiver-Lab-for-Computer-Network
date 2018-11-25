@@ -1,188 +1,201 @@
 #include "sysinclude.h"
-#include <queue>
-#include <iostream>
+
+#include <deque>
+#include <cstring>
+#include <algorithm>
 using namespace std;
 
 extern void SendFRAMEPacket(unsigned char* pData, unsigned int len);
+void _SendFRAMEPacket(unsigned char* pData, unsigned int len)
+{
+	SendFRAMEPacket(pData, len);
+	printf("sending message: ");
+	for (int i = 0; i < len; ++i)
+		printf("%02x ", pData[i]);
+	printf("\n");
+}
+
 #define WINDOW_SIZE_STOP_WAIT 1
 #define WINDOW_SIZE_BACK_N_FRAME 4
 
-#define DATA_BUFFER_SCALE 255
-
-#ifndef  FRAME_TYPE
-#define FRAME_TYPE
-#define DATA 0
-#define ACK 1
-#define NAK 2
-#endif
-
-#define uint_t unsigned int
-#define uchar_t unsigned char
-
-typedef struct frame_head {
-	uint_t type;
-	uint_t seq_num;
-	uint_t ack;
-	uchar_t data[DATA_BUFFER_SCALE];
+typedef enum {data,ack,nak} frame_kind;
+typedef struct frame_head
+{
+	frame_kind kind; //å¸§ç±»åž‹
+	unsigned int seq; //åºåˆ—å·
+	unsigned int ack; //ç¡®è®¤å·
+	unsigned char data[100]; //æ•°æ®
+};
+typedef struct frame
+{
+	frame_head head; //å¸§å¤´
+	unsigned int size; //æ•°æ®çš„å¤§å°
 };
 
-typedef struct frame {
-	frame_head head;
-	uint_t size;
+struct FrameData
+{
+	struct frame data;
+	int seq;
+	bool sent;
 };
 
-queue<frame> frame_to_send_queue;
-queue<frame> backup_buffer_queue;
-frame frame_to_send;
-uint_t sent_buf_num = 0;
-
-inline uint_t reverse(const uint_t data) {
-    // Reverse the word order
-	return(((data & 0xff000000) >> 24) | ((data & 0xff0000) >> 8) | ((data & 0xff00) << 8) | ((data & 0xff) << 24));
-}
-
-
-/*
-* Í£µÈÐ­Òé²âÊÔº¯Êý
-*/
-int stud_slide_window_stop_and_wait(char* pBuffer, int bufferSize, UINT8 messageType) {
-	switch (messageType) {
-	case MSG_TYPE_TIMEOUT:
-		frame_to_send = backup_buffer_queue.front();
-		SendFRAMEPacket((unsigned char *)&frame_to_send, frame_to_send.size);
-		return 0;
-	case MSG_TYPE_SEND:
-		memcpy(&frame_to_send, pBuffer, sizeof(frame));
-		frame_to_send.size = bufferSize;
-		frame_to_send_queue.push(frame_to_send);
-		if (sent_buf_num < WINDOW_SIZE_STOP_WAIT) {
-			frame_to_send = frame_to_send_queue.front();
-			frame_to_send_queue.pop();
-			backup_buffer_queue.push(frame_to_send);
-			SendFRAMEPacket((unsigned char *)&frame_to_send, frame_to_send.size);
-			sent_buf_num++;	
-		}
-		return 0;
-	case MSG_TYPE_RECEIVE:
-		backup_buffer_queue.pop();
-		sent_buf_num -= 1;
-		if (!frame_to_send_queue.empty()) {
-			frame_to_send = frame_to_send_queue.front();
-			frame_to_send_queue.pop();
-			backup_buffer_queue.push(frame_to_send);
-			SendFRAMEPacket((unsigned char *)&frame_to_send, frame_to_send.size);
-			sent_buf_num++;
-		}
-		return 0;
-	DEFAULT:
-		cerr << "Undefined Message Type." << endl;
-		return -1;
-	}
+unsigned int getuint32(char *ptr)
+{
+	return (((unsigned int) *ptr) << 24) 
+			+ (((unsigned int) *(ptr+1)) << 16)
+			+ (((unsigned int) *(ptr+2)) << 8)
+			+ (unsigned int) *(ptr+3);
 }
 
 /*
-* »ØÍËÖ¡²âÊÔº¯Êýn
+* åœç­‰åè®®æµ‹è¯•å‡½æ•°
 */
-int stud_slide_window_back_n_frame(char* pBuffer, int bufferSize, UINT8 messageType) {
-	switch (messageType) {
-	case MSG_TYPE_TIMEOUT:
-		for (int i = 0; i < sent_buf_num; i++) {
-			frame_to_send = backup_buffer_queue.front();
-			backup_buffer_queue.pop();
-			backup_buffer_queue.push(frame_to_send);
-			SendFRAMEPacket((unsigned char *)&frame_to_send, frame_to_send.size);
-		}
-		return 0;
-	case MSG_TYPE_SEND:
-		memcpy(&frame_to_send, pBuffer, sizeof(frame));
-		frame_to_send.size = bufferSize;
-		frame_to_send_queue.push(frame_to_send);
-		while (sent_buf_num < WINDOW_SIZE_BACK_N_FRAME && !frame_to_send_queue.empty()) {
-			frame_to_send = frame_to_send_queue.front();
-			frame_to_send_queue.pop();
-			backup_buffer_queue.push(frame_to_send);
-			SendFRAMEPacket((unsigned char *)&frame_to_send, frame_to_send.size);
-			sent_buf_num++;
-		}
-		return 0;
-	case MSG_TYPE_RECEIVE:
-		int stop_ack = reverse((((frame*)pBuffer)->head).ack);
-		int type = reverse((((frame*)pBuffer)->head).type);
-		if (type != ACK) {
-			// do nothing
-			return 0;
-		}
+int stud_slide_window_stop_and_wait(char *pBuffer, int bufferSize, UINT8 messageType)
+{
+	static deque<FrameData> frames;
 
-		while (reverse((backup_buffer_queue.front()).head.seq_num) <= stop_ack) {
-			backup_buffer_queue.pop();
-			sent_buf_num--;
-			if (sent_buf_num < WINDOW_SIZE_BACK_N_FRAME && !frame_to_send_queue.empty()) {
-				frame_to_send = frame_to_send_queue.front();
-				frame_to_send_queue.pop();
-				backup_buffer_queue.push(frame_to_send);
-				SendFRAMEPacket((unsigned char *)&frame_to_send, frame_to_send.size);
-				sent_buf_num++;
-			}
-		}
-		return 0;
-	DEFAULT:
-		cerr << "Undefined Message Type." << endl;
-		return -1;
+	if (messageType == MSG_TYPE_SEND)
+	{
+		FrameData a;
+		memcpy(&a.data, pBuffer, bufferSize);
+		a.data.size = bufferSize;
+		a.sent = false;
+		frames.push_back(a);
 	}
+
+	if (messageType == MSG_TYPE_RECEIVE)
+	{
+		frame_kind kind = (frame_kind) getuint32(pBuffer);
+		if (kind == ack)
+			frames.pop_front();
+		else // nak
+			frames.front().sent = false;
+	}
+
+	if (messageType == MSG_TYPE_TIMEOUT)
+		frames.front().sent = false;
+	
+	if (!frames.empty() && !frames.front().sent)
+	{
+		FrameData &a = frames.front();
+		SendFRAMEPacket((unsigned char *)&a.data, a.data.size);
+		a.sent = true;
+	}
+	return 0;
 }
 
 /*
-* Ñ¡ÔñÐÔÖØ´«²âÊÔº¯Êý
+* å›žé€€nå¸§æµ‹è¯•å‡½æ•°
 */
-int stud_slide_window_choice_frame_resend(char* pBuffer, int bufferSize, UINT8 messageType) {
-	switch (messageType) {
-	case MSG_TYPE_SEND:
-		memcpy(&frame_to_send, pBuffer, sizeof(frame));
-		frame_to_send.size = bufferSize;
-		frame_to_send_queue.push(frame_to_send);
-		while (sent_buf_num < WINDOW_SIZE_BACK_N_FRAME && !frame_to_send_queue.empty()) {
-			frame_to_send = frame_to_send_queue.front();
-			frame_to_send_queue.pop();
-			backup_buffer_queue.push(frame_to_send);
-			SendFRAMEPacket((unsigned char *)&frame_to_send, frame_to_send.size);
-			sent_buf_num++;
-		}
-		return 0;
-	case MSG_TYPE_RECEIVE:
-		int stop_ack = reverse((((frame*)pBuffer)->head).ack);
-		int type = reverse((((frame*)pBuffer)->head).type);
-		if (type == ACK) {
-			while (reverse((backup_buffer_queue.front()).head.seq_num) <= stop_ack) {
-				backup_buffer_queue.pop();
-				sent_buf_num--;
-				if (sent_buf_num < WINDOW_SIZE_BACK_N_FRAME && !frame_to_send_queue.empty()) {
-					frame_to_send = frame_to_send_queue.front();
-					frame_to_send_queue.pop();
-					backup_buffer_queue.push(frame_to_send);
-					SendFRAMEPacket((unsigned char *)&frame_to_send, frame_to_send.size);
-					sent_buf_num++;
-				}
-			}
-		}
-		else if (type == NAK) {
-			while (reverse((backup_buffer_queue.front()).head.seq_num) < stop_ack) {
-				backup_buffer_queue.pop();
-				sent_buf_num--;
-			}
-			frame_to_send = backup_buffer_queue.front();
-			SendFRAMEPacket((unsigned char *)&frame_to_send, frame_to_send.size);
-			while (sent_buf_num < WINDOW_SIZE_BACK_N_FRAME && !frame_to_send_queue.
-				empty()) {
-				frame_to_send = frame_to_send_queue.front();
-				frame_to_send_queue.pop();
-				backup_buffer_queue.push(frame_to_send);
-				SendFRAMEPacket((unsigned char *)&frame_to_send, frame_to_send.size);
-				sent_buf_num++;
-			}
-		}
-		return 0;
-	DEFAULT:
-		cerr << "Undefined Message Type." << endl;
-		return -1;
+int stud_slide_window_back_n_frame(char *pBuffer, int bufferSize, UINT8 messageType)
+{
+	static deque<FrameData> frames;
+	
+	if (messageType == MSG_TYPE_SEND)
+	{
+		FrameData a;
+		memcpy(&a.data, pBuffer, bufferSize);
+		a.data.size = bufferSize;
+		a.sent = false;
+		frames.push_back(a);
 	}
+
+	if (messageType == MSG_TYPE_RECEIVE)
+	{
+		frame_kind kind = (frame_kind) getuint32(pBuffer);
+		if (kind == ack)
+		{
+			unsigned int seq, ack;
+			ack = *(unsigned int*)(pBuffer+8);
+			do
+			{
+				seq = frames.front().data.head.seq;
+				frames.pop_front();
+			} while (seq != ack);
+		}
+		else // nak
+		{
+			unsigned int nak = *(unsigned int*)(pBuffer+8);
+			while (frames.front().data.head.seq != nak)
+				frames.pop_front();
+			for (int i = 0; i < frames.size() && frames[i].sent; ++i)
+				frames[i].sent = false;
+		}
+	}
+
+	if (messageType == MSG_TYPE_TIMEOUT)
+	{
+		for (int i = 0; i < frames.size() && frames[i].sent; ++i)
+			frames[i].sent = false;
+	}
+
+	int cnt = min(WINDOW_SIZE_BACK_N_FRAME, (int)frames.size());
+	for (int i = 0; i < cnt; ++i)
+	{
+		FrameData &a = frames[i];
+		if (a.sent)
+			continue;
+		SendFRAMEPacket((unsigned char *)&a.data, a.data.size);
+		a.sent = true;
+	}
+
+	return 0;
+}
+
+/*
+* é€‰æ‹©æ€§é‡ä¼ æµ‹è¯•å‡½æ•°
+*/
+int stud_slide_window_choice_frame_resend(char *pBuffer, int bufferSize, UINT8 messageType)
+{
+	static deque<FrameData> frames;
+	
+	if (messageType == MSG_TYPE_SEND)
+	{
+		FrameData a;
+		memcpy(&a.data, pBuffer, bufferSize);
+		a.data.size = bufferSize;
+		a.sent = false;
+		frames.push_back(a);
+	}
+
+	if (messageType == MSG_TYPE_RECEIVE)
+	{
+		frame_kind kind = (frame_kind) getuint32(pBuffer);
+		if (kind == ack)
+		{
+			unsigned int seq, ack;
+			ack = *(unsigned int*)(pBuffer+8);
+			do
+			{
+				seq = frames.front().data.head.seq;
+				frames.pop_front();
+			} while (seq != ack);
+		}
+		else // nak
+		{
+			unsigned int nak = *(unsigned int*)(pBuffer+8);
+			int i = 0;
+			while (frames[i].data.head.seq != nak)
+				++i;
+			frames[i].sent = false;
+		}
+	}
+
+	if (messageType == MSG_TYPE_TIMEOUT)
+	{
+		for (int i = 0; i < frames.size() && frames[i].sent; ++i)
+			frames[i].sent = false;
+	}
+
+	int cnt = min(WINDOW_SIZE_BACK_N_FRAME, (int)frames.size());
+	for (int i = 0; i < cnt; ++i)
+	{
+		FrameData &a = frames[i];
+		if (a.sent)
+			continue;
+		SendFRAMEPacket((unsigned char *)&a.data, a.data.size);
+		a.sent = true;
+	}
+
+	return 0;
 }
