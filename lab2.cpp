@@ -1,92 +1,91 @@
+/*
+* THIS FILE IS FOR IP TEST
+*/
+// system support
 #include "sysInclude.h"
-#include <cstdlib>
 #include <cstring>
 
-extern void ip_DiscardPkt(char* pBuffer, int type);
-extern void ip_SendtoLower(char* pBuffer, int length);
-extern void ip_SendtoUp(char* pBuffer, int length);
+extern void ip_DiscardPkt(char* pBuffer,int type);
+
+extern void ip_SendtoLower(char*pBuffer,int length);
+
+extern void ip_SendtoUp(char *pBuffer,int length);
+
 extern unsigned int getIpv4Address();
 
-#ifndef byte
-#define byte unsigned char
-#endif
+// implemented by students
 
-
-/* Handle packets received */
-int stud_ip_recv(char* pBuffer, unsigned short length) {
-	const unsigned int Version = (unsigned)pBuffer[0] >> 4;
-	const unsigned int IHL = (unsigned)pBuffer[0] & 0xF;
-	const unsigned int TTL = (unsigned)pBuffer[8];
-	const unsigned int DstAddr = ntohl(*(unsigned int *)(&pBuffer[16]));
-	unsigned int HeaderCheckSum = 0;
-
-	if (Version != 4) {
+int stud_ip_recv(char *pBuffer,unsigned short length)
+{
+	unsigned version = (unsigned char)pBuffer[0] >> 4;
+	unsigned IHL = (unsigned char)pBuffer[0] & 0xf;
+	unsigned TTL = (unsigned char)pBuffer[8];
+		
+	/* check version */
+	if (version != 4) {
 		ip_DiscardPkt(pBuffer, STUD_IP_TEST_VERSION_ERROR);
-		return -1;
+		return 1;
 	}
+	
+	/* check IP Header Length */
 	if (IHL < 5) {
 		ip_DiscardPkt(pBuffer, STUD_IP_TEST_HEADLEN_ERROR);
-		return -11;
+		return 1;
 	}
-	if (!TTL) {
+	
+	/* check Time to Live */
+	if (TTL == 0) {
 		ip_DiscardPkt(pBuffer, STUD_IP_TEST_TTL_ERROR);
-		return -1;
+		return 1;
 	}
-
-	if (DstAddr != getIpv4Address() && DstAddr != 0xFFFFFFFF) {
+	
+	/* check destination address */
+	unsigned addr = ntohl(*(unsigned int *)(&pBuffer[16]));
+	if (addr != getIpv4Address() && ~addr != 0) {
 		ip_DiscardPkt(pBuffer, STUD_IP_TEST_DESTINATION_ERROR);
-		return -1;
+		return 1;
 	}
 
-	for (int i = 0; i < 20; i += 2) {
-		HeaderCheckSum += ((pBuffer[i] & 0xFF) << 8) + (pBuffer[i + 1] & 0xFF);
-	}
-	HeaderCheckSum += (HeaderCheckSum >> 16);
-
-	if ((unsigned short)(~HeaderCheckSum)) {
+	/* check checksum */
+	unsigned checksum = 0;
+	for (int i = 0; i < 4*IHL; i += 2)
+		checksum += ((unsigned char)pBuffer[i] << 8u) + (unsigned char)pBuffer[i+1];
+	checksum = (checksum & 0xffff) + (checksum >> 16);
+	if (~checksum & 0xffff != 0) {
 		ip_DiscardPkt(pBuffer, STUD_IP_TEST_CHECKSUM_ERROR);
-		return -1;
+		return 1;
 	}
-
+	
 	ip_SendtoUp(pBuffer, length);
-
 	return 0;
 }
 
-/* Send packets */
-int stud_ip_Upsend(char* pBuffer, unsigned short len, unsigned int srcAddr,
-                   unsigned int dstAddr, byte protocol, byte ttl) {
-	const unsigned int Version = 4;
-	const unsigned int IHL = 5;
-	const unsigned int TotalLen = 4 * IHL + len;
-	unsigned int HeaderCheckSum = 0;
-	unsigned char* Buffer = (unsigned char*) malloc(TotalLen);
-
-	memset(Buffer, 0, TotalLen);
-
-	Buffer[0] = Version << 4 | IHL;
-	Buffer[2] = TotalLen >> 8;
-	Buffer[3] = TotalLen;
-	Buffer[8] = ttl;
-	Buffer[9] = protocol;
-	Buffer[12] = srcAddr >> 24;
-	Buffer[13] = srcAddr >> 16;
-	Buffer[14] = srcAddr >> 8;
-	Buffer[15] = srcAddr;
-	Buffer[16] = dstAddr >> 24;
-	Buffer[17] = dstAddr >> 16;
-	Buffer[18] = dstAddr >> 8;
-	Buffer[19] = dstAddr;
-	memcpy(Buffer + 20, pBuffer, len);
-	for (int i = 0; i < 20; i += 2) {
-		HeaderCheckSum += ((Buffer[i] & 0xFF) << 8) + (Buffer[i + 1] & 0xFF);
-	}
-	HeaderCheckSum += HeaderCheckSum >> 16;
-	HeaderCheckSum = ~HeaderCheckSum;
-	Buffer[10] = (char)((unsigned short)HeaderCheckSum >> 8);
-	Buffer[11] = (char)((unsigned short)HeaderCheckSum & 0xFF);
-
-	ip_SendtoLower((char*)Buffer, TotalLen);
-
+int stud_ip_Upsend(char *pBuffer,unsigned short len,unsigned int srcAddr,
+				   unsigned int dstAddr,byte protocol,byte ttl)
+{
+	unsigned version = 4;
+	unsigned IHL = 5;
+	unsigned length = 4*IHL + len;
+	char *buffer = new char[length];
+	buffer[0] = (version << 4) + IHL;
+	buffer[1] = 0;
+	buffer[2] = length >> 8;
+	buffer[3] = length & 0xff;
+	buffer[4] = buffer[5] = buffer[6] = buffer[7] = 0;
+	buffer[8] = ttl;
+	buffer[9] = protocol;
+	buffer[10] = buffer[11] = 0;
+	*(unsigned *)&buffer[12] = htonl(srcAddr);
+	*(unsigned *)&buffer[16] = htonl(dstAddr);
+	unsigned checksum = 0;
+	for (int i = 0; i < 4*IHL; i += 2)
+		checksum += ((unsigned char)buffer[i] << 8u) + (unsigned char)buffer[i+1];
+	checksum = (checksum & 0xffff) + (checksum >> 16);
+	checksum = ~checksum;
+	buffer[10] = checksum >> 8;
+	buffer[11] = checksum & 0xff;
+	memcpy(buffer + 4*IHL, pBuffer, len);
+	ip_SendtoLower(buffer, length);
+	delete[] buffer;
 	return 0;
 }
