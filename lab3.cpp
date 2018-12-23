@@ -1,69 +1,112 @@
+/*
+* THIS FILE IS FOR IP FORWARD TEST
+*/
 #include "sysInclude.h"
-#include<map>
-using std::map;
-using std::pair;
+#include <cstring>
 
-extern void fwd_LocalRcv(char* pBuffer, int length);
-extern void fwd_SendtoLower(char* pBuffer, int length, unsigned int nexthop);
-extern void fwd_DiscardPkt(char* pBuffer, int type);
-extern unsigned int getIpv4Address();
+// system support
+extern void fwd_LocalRcv(char *pBuffer, int length);
 
-/* RouteTable <DstAddr, nexthop> */
-map<int, int> RouteTable;
+extern void fwd_SendtoLower(char *pBuffer, int length, unsigned int nexthop);
 
-/* Initializing the RouteTable */
-void stud_Route_Init() {
-	RouteTable.clear();
-	return;
+extern void fwd_DiscardPkt(char *pBuffer, int type);
+
+extern unsigned int getIpv4Address( );
+
+// implemented by students
+
+/*
+typedef struct stud_route_msg
+{
+	unsigned int dest;
+	unsigned int masklen;
+	unsigned int nexthop;
+} stud_route_msg;
+*/
+
+struct Trie {
+	Trie *son[2];
+	unsigned *nexthop;
+	Trie()
+	{
+		son[0] = son[1] = NULL;
+		nexthop = NULL;
+	}
+} *root;
+
+void stud_Route_Init()
+{
+	root = new Trie;
 }
 
-/* Adding a new entry to the RouteTable */
-void stud_route_add(stud_route_msg* proute) {
-	const int DstAddr = (ntohl(proute->dest)) & (0xFFFFFFFF << (32 - htonl(proute->masklen)));
-	const int NextHop = ntohl(proute->nexthop);
-	RouteTable.insert(std::pair<int, int>(DstAddr, NextHop));
-	return;
+void stud_route_add(stud_route_msg *proute)
+{
+	unsigned addr = ntohl(proute->dest);
+	unsigned len = ntohl(proute->masklen);
+	Trie *p = root;
+	for (unsigned i = 0; i < len; ++i) {
+		int bit = (addr >> (31 - i)) & 1;
+		if (p->son[bit] == NULL)
+			p->son[bit] = new Trie;
+		p = p->son[bit];
+	}
+	p->nexthop = new unsigned(ntohl(proute->nexthop));
 }
 
-/* Dealing with the reception and forwarding */
-int stud_fwd_deal(char* pBuffer, int length) {
-	const int IHL = pBuffer[0] & 0xf;
-	const int TTL = (int)pBuffer[8];
-	int DstAddr = ntohl(*(unsigned *)(&pBuffer[16]));
+unsigned *stud_route_find(Trie *head, unsigned addr, int pos)
+{
+	if (pos == 32 || head == NULL)
+		return NULL;
+	int bit = (addr >> (31 - pos)) & 1;
+	unsigned *ans = stud_route_find(head->son[bit], addr, pos + 1);
+	return ans ? ans : head->nexthop;
+}
 
-	if (DstAddr == getIpv4Address()) {
+unsigned *stud_route_find(unsigned addr)
+{
+	return stud_route_find(root, addr, 0);
+}
+
+
+int stud_fwd_deal(char *pBuffer, int length)
+{
+	/* receive local package */
+	unsigned addr = ntohl(*(unsigned *)(pBuffer + 16));
+	if (addr == getIpv4Address()) {
 		fwd_LocalRcv(pBuffer, length);
 		return 0;
 	}
-	if (TTL <= 0) {
+	
+	/* check TTL */
+	unsigned TTL = (unsigned char)pBuffer[8];
+	if (TTL == 0) {
 		fwd_DiscardPkt(pBuffer, STUD_FORWARD_TEST_TTLERROR);
-		return -1;
+		return 1;
 	}
-
-	map<int, int>::iterator map_iterator = RouteTable.find(DstAddr);
-
-	if (map_iterator == RouteTable.end()) {
+	
+	/* find next hop */
+	unsigned *nexthop = stud_route_find(addr);
+	if (nexthop == NULL) {
 		fwd_DiscardPkt(pBuffer, STUD_FORWARD_TEST_NOROUTE);
-		return -1;
+		return 1;
 	}
-
-	unsigned char* Buffer = (unsigned char *)malloc(length);
-	memcpy(Buffer, pBuffer, length);
-
-	Buffer[8] = TTL - 1;
-
-	unsigned int HeaderCheckSum = 0;
-	memset(&Buffer[10], 0, sizeof(short));
-	for (int i = 0; i < 4 * IHL; i += 2) {
-		HeaderCheckSum += ((Buffer[i] & 0xFF) << 8) + (Buffer[i + 1] & 0xFF);
-	}
-	HeaderCheckSum += (HeaderCheckSum >> 16);
-	HeaderCheckSum = ~HeaderCheckSum;
-
-	Buffer[10] = (unsigned short)HeaderCheckSum >> 8;
-	Buffer[11] = (unsigned short)HeaderCheckSum & 0xFF;
-
-	fwd_SendtoLower((char *)Buffer, length, (*map_iterator).second);
-
+	
+	/* new package */
+	char *buffer = new char[length];
+	memcpy(buffer, pBuffer, length);
+	buffer[8] = TTL - 1;
+	/* compute checksum */
+	buffer[10] = buffer[11] = 0;
+	int IHL = pBuffer[0] & 0xf;
+	unsigned checksum = 0;
+	for (int i = 0; i < 4*IHL; i += 2)
+		checksum += ((unsigned char)buffer[i] << 8u) + (unsigned char)buffer[i+1];
+	checksum = (checksum & 0xffff) + (checksum >> 16);
+	checksum = ~checksum;
+	buffer[10] = checksum >> 8;
+	buffer[11] = checksum & 0xff;
+	fwd_SendtoLower(buffer, length, *nexthop);
+	delete[] buffer;
 	return 0;
 }
+
